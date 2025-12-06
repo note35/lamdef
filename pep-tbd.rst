@@ -340,6 +340,14 @@ Variable scoping and closures behave identically to standard ``def`` statements,
     c()  # 1
     c()  # 2
 
+``lamdef`` can be added into f-string and t-string::
+
+    template = t"<div>{(
+        lamdef(name: str) -> str:
+            if name == "Admin":
+                return "Welcome, Admin"
+            return f"Hello, {name}"
+    )("Alice")}</div>"
 
 3. Multi-line Lamdef (Container)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

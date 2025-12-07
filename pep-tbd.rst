@@ -859,21 +859,9 @@ Although single-line syntax is technically possible, we chose to reserve it (rai
 Why not extend lambda to support type hints?
 --------------------------------------------
 
-If you desire to have something like this::
+While extending ``lambda`` to support type hints is technically feasible, it reintroduces the exact **semantic ambiguity** and visual confusion that led us to ban single-line lamdef in the first place.
 
-    f = lambda (x: int, y: int): x + y
-
-PEP 3113 removes Tuple Parameter Unpacking is one of the strongest reason::
-
-    # SyntaxError: Lambda expression parameters cannot be parenthesized
-    f = lambda (x, y): x + y
-
-
-And if you desire to have something like this (no space between ``lambda`` and ``(``)::
-
-    a = lambda(x: int, y: int): x + y
-
-This would allow lambda to have two ways (``lambda(x):`` vs ``lambda x:``) to do the same thing, which violates the Zen of Python: There should be one-- and preferably only one --obvious way to do it.
+As detailed in the section "Why is Single-line Lamdef currently reserved (banned)?", allowing complex, typed signatures on a single-line construct blurs the distinction between a concise expression and a full function block. To maintain clarity, this proposal keeps lambda simple (untyped, expression-only) and reserves lamdef strictly for multi-line blocks.
 
 Why not extend ``def``?
 -----------------------

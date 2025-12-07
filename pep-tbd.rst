@@ -255,6 +255,226 @@ Formal Grammar
     lamdef_body[asdl_stmt_seq*]:
         | NEWLINE INDENT a=statements DEDENT { a }
 
+
+Lexer
+-----
+
+The introduction of ``lamdef`` requires specific modifications to the lexer's behavior regarding implicit line continuation.
+
+Token State Definition
+~~~~~~~~~~~~~~~~~~~~~~
+
+Defines token state extensions in **[state.c](https://github.com/gkirchou/cpython/blob/lamdef/Parser/lexer/state.c)**::
+
+    struct tok_state *
+    _PyTokenizer_tok_new(void)
+    {
+        ...
+        /* lamdef-related fields */
+        tok->in_lamdef_colon       = 0;   /* Flag: just processed a colon ending a lamdef header */
+        tok->lamdef_allow_indent   = 0;   /* Flag: enables indentation sensitivity within delimiters */
+        tok->lamdef_start_level    = -1;  /* Snapshot: parenlevel at 'lamdef' keyword for colon matching */
+        tok->lamdef_start_indent   = -1;  /* Baseline: indentation index to determine block exit via DEDENT */
+        tok->lamdef_start_col      = -1;  /* Baseline: column index for Off-side Rule termination */
+        tok->lamdef_base_level     = -1;  /* Baseline: parenlevel to filter nested delimiters */
+        ...
+    }
+
+Keyword Detection
+~~~~~~~~~~~~~~~~~
+
+In ``tok_get_normal_mode`` of **[lexer.c](https://github.com/gkirchou/cpython/blob/lamdef/Parser/lexer/lexer.c)**, detects the soft keyword ``lamdef`` and captures the initial context::
+
+    if (is_potential_identifier_start(c)) {
+        ...
+
+        // Identifies 'lamdef' keyword.
+        if (p_end - p_start == 6 && strncmp(p_start, "lamdef", 6) == 0) {
+             // Snapshots current parenthesis nesting level.
+             tok->lamdef_start_level = tok->level;
+
+             // Calculates and records the visual column for Off-side Rule.
+             int col = 0;
+             for (const char *c = tok->line_start; c < p_start; c++) {
+                 if (*c == '\t') {
+                     col = (col / tok->tabsize + 1) * tok->tabsize;
+                 }
+                 else {
+                     col++;
+                 }
+             }
+             tok->lamdef_start_col = col;
+        }
+        ...
+
+Header Termination
+~~~~~~~~~~~~~~~~~~
+
+Detects the specific colon that terminates the ``lamdef`` signature::
+
+    // Validates the terminator.
+    // Matches a colon only if it corresponds to the nesting level
+    // recorded at the start of the 'lamdef' keyword.
+    if (c == ':' && tok->lamdef_start_level != -1 && tok->level == tok->lamdef_start_level) {
+        // Signals the transition from Header to Body.
+        tok->in_lamdef_colon = 1;
+
+        // Clears the snapshot as the header is successfully parsed.
+        tok->lamdef_start_level = -1;
+    }
+
+
+Block Entry & Newline Handling
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Intercepts the newline following the header to trigger the "Grammatical Inversion" mode::
+
+    /* Newline */
+    if (c == '\n') {
+        // Checks for the pending transition signal.
+        if (tok->in_lamdef_colon) {
+            // Consumes the signal.
+            tok->in_lamdef_colon = 0;
+
+            // Activates "Lamdef Body Mode" (overriding implicit line joining).
+            if (!tok->lamdef_allow_indent) {
+                tok->lamdef_allow_indent = 1;
+
+                // Captures the baseline indentation stack index.
+                tok->lamdef_start_indent = tok->indent;
+
+                // Captures the baseline delimiter nesting level.
+                tok->lamdef_base_level = tok->level;
+            }
+
+            // Forces the emission of a NEWLINE token to prepare the parser for INDENT.
+            p_start = tok->start;
+            p_end = tok->cur - 1;
+            tok->cont_line = 0;
+            return MAKE_TOKEN(NEWLINE);
+        }
+
+        // Implicit continuation check:
+        // The condition is restricted so that valid indentation within a 'lamdef'
+        // body is NOT treated as a continuation line.
+        if (blankline || (tok->level > 0 && (!tok->lamdef_allow_indent || tok->level > tok->lamdef_base_level))) {
+            ...
+
+Visual Termination (Off-side Rule)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Checks for indentation alignment during token processing::
+
+    // Indentation validation:
+    // Extended to evaluate indentation levels within delimiters
+    // when 'lamdef_allow_indent' is active.
+    if (!blankline && (tok->level == 0 || tok->lamdef_allow_indent)) {
+        ...
+        else /* col < tok->indstack[tok->indent] */ {
+            ...
+            // Detects a DEDENT event.
+            if (col != tok->indstack[tok->indent]) {
+
+                // Enforces the Off-side Rule:
+                // If visual alignment matches the 'lamdef' keyword, terminate the block.
+                if (tok->lamdef_allow_indent && col == tok->lamdef_start_col) {
+                    tok->lamdef_allow_indent = 0;
+                }
+                else {
+                    ....
+
+Logical Termination (DEDENT)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Handles block exit via standard DEDENT processing::
+
+    /* Return pending indents/dedents */
+    if (tok->pendin != 0) {
+        ...
+        // Checks if the DEDENT returns to (or below) the lamdef's starting scope.
+        if (tok->lamdef_allow_indent && tok->indent <= tok->lamdef_start_indent) {
+            // Terminates "Lamdef Body Mode".
+            tok->lamdef_allow_indent = 0;
+
+            // Forces token level to 0.
+            // Required because the standard grammar only accepts DEDENT tokens at the top level.
+            token->level = 0;
+        }
+        ...
+
+Performance Considerations & Implementation Strategy
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The standard tokenizer loop (``tok_get``) is a critical hot path. Introducing complex state checks for ``lamdef`` directly into this loop could introduce performance regressions for all Python code, even when ``lamdef`` is not used. To mitigate this, the implementation adopts a **"Hot Path Protection"** strategy (similar to [f-strings](https://peps.python.org/pep-0701/):
+
+1.  **State Isolation:** New state variables are added to ``struct tok_state`` in **state.c**.
+2.  **Branch Prediction Hints:** The check for ``lamdef`` nesting is wrapped in ``unlikely()`` macros to ensure the CPU branch predictor favors the standard path.
+3.  **Logic Offloading:** Complex logic regarding logical line tracking within ``lamdef`` is offloaded to a wrapper function ``tok_get_lamdef_mode``.
+
+**Tokenizer State Extension:**::
+
+    struct tok_state *
+    _PyTokenizer_tok_new(void)
+    {
+        ...
+
+        /* lamdef-related optimization fields */
+        tok->lamdef_nesting_level  = 0;  /* Slow path trigger: Tracks active lamdef depth to skip checks in hot path */
+        tok->at_logical_line_start = 1;  /* Slow path state: Tracks logical line start for delimiter handling */
+
+        ...
+    }
+
+**Hot Path Protection in ``tok_get``:**
+
+The main tokenizer loop minimizes overhead by delegating ``lamdef`` handling only when strictly necessary::
+
+    // Fast path: Standard Python code (No active lamdef)
+    if (likely(tok->lamdef_nesting_level == 0)) {
+        rc = (current_tok->kind == TOK_REGULAR_MODE)
+                 ? tok_get_normal_mode(tok, current_tok, token)
+                 : tok_get_fstring_mode(tok, current_tok, token);
+
+        // State Transition Check:
+        // Did tok_get_normal_mode() just encounter a 'lamdef' keyword?
+        // If so, we must initialize the logical line tracking for the next token.
+        if (unlikely(tok->lamdef_nesting_level > 0)) {
+            tok->at_logical_line_start = 0;
+        }
+    } else {
+        // Slow path: Active lamdef context
+        // Offload complexity to a dedicated handler
+        rc = tok_get_lamdef_mode(tok, current_tok, token);
+    }
+
+**Wrapper Logic (``tok_get_lamdef_mode``):**
+
+This wrapper intercepts tokens to maintain ``at_logical_line_start`` state, which is crucial for distinguishing between `lamdef` body content and container closing delimiters::
+
+    static int
+    tok_get_lamdef_mode(struct tok_state *tok, tokenizer_mode* current_tok, struct token *token)
+    {
+        // Delegate to the underlying mode (Regular or F-string)
+        int rc = (current_tok->kind == TOK_REGULAR_MODE)
+                 ? tok_get_normal_mode(tok, current_tok, token)
+                 : tok_get_fstring_mode(tok, current_tok, token);
+
+        // Intercept tokens to handle specific delimiter collisions (if at line start)
+        if (tok->at_logical_line_start) {
+            if (rc == OP && token->end - token->start == 1) {
+                // ... Logic to handle Off-side Rule termination against delimiters
+            }
+        }
+
+        // Update logical line state for the next iteration
+        if (rc == NEWLINE || rc == INDENT || rc == DEDENT) {
+            tok->at_logical_line_start = 1;
+        } else if (rc != NL && rc != COMMENT && rc != TYPE_COMMENT && rc != TYPE_IGNORE) {
+            tok->at_logical_line_start = 0;
+        }
+        return rc;
+    }
+
 Detailed Specification
 ----------------------
 
@@ -526,12 +746,6 @@ Therefore, static type checkers are expected to detect type mismatch cases, for 
     # error: Argument 1 to "process" has incompatible type "Callable[[Any], str]"; expected "Callable[[int], int]"
 
 
-Performance Challenge in Lexer
-------------------------------
-
-Similar to [f-strings](https://peps.python.org/pep-0701/), the proposed lamdef introduces a Grammatical Inversion (INDENT/DEDENT tokens in an expression context) that disrupts the standard linear parsing flow of Python which requires specialized token handling for performance reasons.
-
-
 Rationale
 =========
 
@@ -602,12 +816,14 @@ Implementation
 
 Please refer to the cpython fork (https://github.com/gkirchou/cpython/tree/lamdef).
 
+**Note on Performance:** This implementation serves as a proof-of-concept to validate the grammar syntax and lexer state transitions. The specific optimizations detailed in the "Performance Considerations" section are **not yet implemented** in this prototype.
 
 Benchmark
 =========
 
 Please refer to this repo (https://github.com/note35/lamdef/tree/main/cpython/benchmark).
 
+**Note on Performance:** This implementation serves as a proof-of-concept to validate the grammar syntax and lexer state transitions. The specific optimizations detailed in the "Performance Considerations" section are **not yet implemented** in this prototype.
 
 FAQ
 ===

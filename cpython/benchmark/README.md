@@ -1,6 +1,6 @@
 # Benchmark
 
-New syntax expects a performance drain. Here is what I did to measure this.
+New syntax expects a performance drain. Here is what I did to measure this based on the implementation without any optimization.
 
 ## Pyperformance
 

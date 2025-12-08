@@ -1317,11 +1317,13 @@ tok_get_normal_mode(struct tok_state *tok, tokenizer_mode* current_tok, struct t
         }
 
         if (c == ':' && cursor == current_tok->curly_bracket_expr_start_depth) {
-            current_tok->kind = TOK_FSTRING_MODE;
-            current_tok->in_format_spec = 1;
-            p_start = tok->start;
-            p_end = tok->cur;
-            return MAKE_TOKEN(_PyToken_OneChar(c));
+            if (tok->lamdef_start_level == -1 || tok->level != tok->lamdef_start_level) {
+                current_tok->kind = TOK_FSTRING_MODE;
+                current_tok->in_format_spec = 1;
+                p_start = tok->start;
+                p_end = tok->cur;
+                return MAKE_TOKEN(_PyToken_OneChar(c));
+            }
         }
     }
 

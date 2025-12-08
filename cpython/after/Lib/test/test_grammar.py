@@ -2400,6 +2400,52 @@ lamdef(x: int) -> int:
         ns = {'assertEqual': self.assertEqual}
         exec(textwrap.dedent(code), ns)
 
+    def test_pattern_matching(self):
+        """Level 25: lamdef in pattern matching"""
+        code = """
+        def func(t):
+            match t:
+                case "a":
+                    return lamdef():
+                        return 1
+                case "b":
+                    return lamdef():
+                        return 2
+                case _:
+                    return lamdef():
+                        return -1
+        assertEqual(func("a")(), 1)
+        assertEqual(func("b")(), 2)
+        assertEqual(func("c")(), -1)
+        """
+        ns = {'assertEqual': self.assertEqual}
+        exec(textwrap.dedent(code), ns)
+
+    def test_fstring(self):
+        """Level 26: f-string support"""
+        code = """
+        r = f"{(lamdef(x: int) -> int:
+            return x
+        )(1)}"
+        assertEqual(r, "1")
+        """
+        ns = {'assertEqual': self.assertEqual}
+        exec(textwrap.dedent(code), ns)
+
+    def test_fstring_with_format(self):
+        """Level 27: f-string support with format"""
+        code = """
+        import math
+        # The inner colon is for type hint, the outer colon is for formatting (.2f)
+        r = f"Pi: {(
+            lamdef() -> float:
+                return math.pi
+        )():.2f}"
+        assertEqual(r, "Pi: 3.14")
+        """
+        ns = {'assertEqual': self.assertEqual}
+        exec(textwrap.dedent(code), ns)
+
 
 if __name__ == '__main__':
     unittest.main()
